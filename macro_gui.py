@@ -7,6 +7,11 @@ import sys
 import random
 import os
 import json
+import wave
+import struct
+import subprocess
+import shutil
+import math
 from PIL import Image, ImageTk
 import pystray
 from pystray import MenuItem, Menu
@@ -88,6 +93,80 @@ DEFAULT_CONFIG = {
 CONFIG_DIR = os.path.expanduser("~/.config/input-master")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 
+# --- AUDIO PATH ---
+AUDIO_DIR = os.path.join(CONFIG_DIR, "audio")
+BEEP_ON_FILE = os.path.join(AUDIO_DIR, "beep-on.wav")
+BEEP_OFF_FILE = os.path.join(AUDIO_DIR, "beep-off.wav")
+
+
+def _generate_sine_beep(filepath, frequency=2400, duration_ms=120, volume=0.5, double=False):
+    sample_rate = 44100
+    if double:
+        gap_ms = 80
+        total_ms = duration_ms * 2 + gap_ms
+        num_samples = int(sample_rate * total_ms / 1000)
+    else:
+        total_ms = duration_ms
+        num_samples = int(sample_rate * duration_ms / 1000)
+    samples = []
+    for i in range(num_samples):
+        t = i / sample_rate
+        if double:
+            beep1_end = int(sample_rate * duration_ms / 1000)
+            beep2_start = int(sample_rate * (duration_ms + gap_ms) / 1000)
+            if i < beep1_end:
+                local_i = i
+                local_dur = beep1_end
+            elif i >= beep2_start:
+                local_i = i - beep2_start
+                local_dur = num_samples - beep2_start
+            else:
+                samples.append(struct.pack("<h", 0))
+                continue
+        else:
+            local_i = i
+            local_dur = num_samples
+        envelope = 1.0
+        fade_len = int(sample_rate * 0.005)
+        if local_i < fade_len:
+            envelope = local_i / fade_len
+        elif local_i > local_dur - fade_len:
+            envelope = (local_dur - local_i) / fade_len
+        sine_val = math.sin(2 * math.pi * frequency * t)
+        raw = int(volume * 32767 * sine_val)
+        clamped = max(-32768, min(32767, raw))
+        samples.append(struct.pack("<h", int(envelope * clamped)))
+    with wave.open(filepath, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(b"".join(samples))
+
+
+def _ensure_beep_files():
+    os.makedirs(AUDIO_DIR, exist_ok=True)
+    if not os.path.exists(BEEP_ON_FILE):
+        _generate_sine_beep(BEEP_ON_FILE, frequency=2400, duration_ms=120, double=True)
+    if not os.path.exists(BEEP_OFF_FILE):
+        _generate_sine_beep(BEEP_OFF_FILE, frequency=1800, duration_ms=120, double=False)
+
+
+def _play_beep(filepath):
+    try:
+        cmd = None
+        for player in ("paplay", "aplay", "canberra-gtk-play"):
+            if shutil.which(player):
+                cmd = player
+                break
+        if cmd == "paplay":
+            subprocess.Popen([cmd, filepath], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        elif cmd == "aplay":
+            subprocess.Popen([cmd, "-q", filepath], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        elif cmd == "canberra-gtk-play":
+            subprocess.Popen([cmd, "-f", filepath], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
 # Collect all possible remap keycodes for UInput capabilities
 _REMAP_KEYCODES = list(set(v for v in REMAP_KEY_MAP.values() if isinstance(v, int)))
 
@@ -115,6 +194,7 @@ class MacroBackend:
         self.thread = threading.Thread(target=self._run_loop, daemon=True)
         self.thread.start()
         print(">>> ENGINE STARTED")
+        threading.Thread(target=_play_beep, args=(BEEP_ON_FILE,), daemon=True).start()
 
     def stop(self):
         if not self.running: return
@@ -123,6 +203,7 @@ class MacroBackend:
         if self.thread:
             self.thread.join(timeout=1.0)
         print(">>> ENGINE STOPPED")
+        threading.Thread(target=_play_beep, args=(BEEP_OFF_FILE,), daemon=True).start()
 
     def _get_device(self, name_fragment, capability=None):
         devices = [evdev.InputDevice(path) for path in evdev.list_devices()]
@@ -208,6 +289,8 @@ class MacroBackend:
                             self.macro_enabled_toggle = not self.macro_enabled_toggle
                             state = "ENABLED" if self.macro_enabled_toggle else "DISABLED"
                             print(f">>> KEY SHORTCUT: Macros {state}")
+                            sound = BEEP_ON_FILE if self.macro_enabled_toggle else BEEP_OFF_FILE
+                            threading.Thread(target=_play_beep, args=(sound,), daemon=True).start()
         except: pass
 
     def _run_loop(self):
@@ -281,6 +364,7 @@ class App(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.backend = MacroBackend()
+        _ensure_beep_files()
         self.load_config()
         self.title("Input Master Control")
         self.geometry("700x820")
@@ -504,6 +588,8 @@ class App(ctk.CTk):
         self.backend.macro_enabled_toggle = new_state
         state_text = "ENABLED" if new_state else "DISABLED"
         print(f">>> GUI TOGGLE: Macros {state_text}")
+        sound = BEEP_ON_FILE if new_state else BEEP_OFF_FILE
+        threading.Thread(target=_play_beep, args=(sound,), daemon=True).start()
 
     def write(self, text):
         self.log_box.insert("end", text)
