@@ -151,18 +151,33 @@ def _ensure_beep_files():
         _generate_sine_beep(BEEP_OFF_FILE, frequency=1800, duration_ms=120, double=False)
 
 
+AUDIO_PLAYERS = [
+    "/usr/bin/paplay",
+    "/usr/bin/aplay",
+    "/usr/bin/canberra-gtk-play",
+]
+
+def _find_player():
+    for p in AUDIO_PLAYERS:
+        if os.path.isfile(p) and os.access(p, os.X_OK):
+            return p
+    for player in ("paplay", "aplay", "canberra-gtk-play"):
+        found = shutil.which(player)
+        if found:
+            return found
+    return None
+
+
 def _play_beep(filepath):
     try:
-        cmd = None
-        for player in ("paplay", "aplay", "canberra-gtk-play"):
-            if shutil.which(player):
-                cmd = player
-                break
-        if cmd == "paplay":
+        cmd = _find_player()
+        if not cmd:
+            return
+        if cmd.endswith("paplay"):
             subprocess.Popen([cmd, filepath], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        elif cmd == "aplay":
+        elif cmd.endswith("aplay"):
             subprocess.Popen([cmd, "-q", filepath], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        elif cmd == "canberra-gtk-play":
+        elif cmd.endswith("canberra-gtk-play"):
             subprocess.Popen([cmd, "-f", filepath], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         pass
@@ -365,6 +380,7 @@ class App(ctk.CTk):
         super().__init__()
         self.backend = MacroBackend()
         _ensure_beep_files()
+        self._suppress_toggle_audio = False
         self.load_config()
         self.title("Input Master Control")
         self.geometry("700x820")
@@ -567,8 +583,10 @@ class App(ctk.CTk):
         current_switch_val = 1 if self.switch_master.get() else 0
         backend_val = 1 if self.backend.macro_enabled_toggle else 0
         if current_switch_val != backend_val:
+            self._suppress_toggle_audio = True
             if backend_val == 1: self.switch_master.select()
             else: self.switch_master.deselect()
+            self.after(50, self._clear_toggle_suppress)
 
         # Update tray icon color
         if not self.backend.running:
@@ -588,8 +606,12 @@ class App(ctk.CTk):
         self.backend.macro_enabled_toggle = new_state
         state_text = "ENABLED" if new_state else "DISABLED"
         print(f">>> GUI TOGGLE: Macros {state_text}")
-        sound = BEEP_ON_FILE if new_state else BEEP_OFF_FILE
-        threading.Thread(target=_play_beep, args=(sound,), daemon=True).start()
+        if not self._suppress_toggle_audio:
+            sound = BEEP_ON_FILE if new_state else BEEP_OFF_FILE
+            threading.Thread(target=_play_beep, args=(sound,), daemon=True).start()
+
+    def _clear_toggle_suppress(self):
+        self._suppress_toggle_audio = False
 
     def write(self, text):
         self.log_box.insert("end", text)
