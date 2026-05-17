@@ -7,8 +7,6 @@ import sys
 import random
 import os
 import json
-import wave
-import struct
 import subprocess
 from PIL import Image, ImageTk
 import pystray
@@ -167,7 +165,9 @@ class MacroBackend:
         self.thread = None
         self.config = DEFAULT_CONFIG.copy()
         self.physical_left_down = False
-        self.firing_burst = False
+        self.firing_active = False
+        self._fire_lock = threading.Lock()
+        self._fire_cond = threading.Condition(self._fire_lock)
         self.click_timestamps = []
         self.macro_enabled_toggle = True
         self.meta_held = False
@@ -255,7 +255,6 @@ class MacroBackend:
         self.thread = threading.Thread(target=self._run_loop, daemon=True)
         self.thread.start()
         print(">>> ENGINE STARTED")
-        self._play_notification_sound("start")
 
     def stop(self):
         if not self.running:
@@ -265,7 +264,6 @@ class MacroBackend:
         if self.thread:
             self.thread.join(timeout=1.0)
         print(">>> ENGINE STOPPED")
-        self._play_notification_sound("stop")
 
     def _get_device(self, name_fragment, capability=None):
         devices = [evdev.InputDevice(path) for path in evdev.list_devices()]
@@ -279,47 +277,61 @@ class MacroBackend:
         return None
 
     def _burst_fire(self, vmouse):
-        self.firing_burst = True
+        with self._fire_lock:
+            if self.firing_active:
+                return
+            self.firing_active = True
         time.sleep(0.2)
         count = int(self.config["burst_count"])
         duration = float(self.config["burst_duration"])
         min_hold = 0.04
         base_delay = (duration / count) - min_hold
 
-        for _ in range(count):
-            if not self.firing_burst or not self.macro_enabled_toggle:
-                break
-            hold = random.uniform(min_hold, min_hold + 0.02)
-            wait = random.uniform(base_delay * 0.9, base_delay * 1.1)
-            vmouse.write(ecodes.EV_KEY, ecodes.BTN_LEFT, 1)
-            vmouse.syn()
-            time.sleep(hold)
-            vmouse.write(ecodes.EV_KEY, ecodes.BTN_LEFT, 0)
-            vmouse.syn()
-            time.sleep(wait)
-        self.click_timestamps.clear()
-        self.firing_burst = False
+        try:
+            for _ in range(count):
+                if self.stop_event.is_set():
+                    break
+                hold = random.uniform(min_hold, min_hold + 0.02)
+                wait = random.uniform(base_delay * 0.9, base_delay * 1.1)
+                vmouse.write(ecodes.EV_KEY, ecodes.BTN_LEFT, 1)
+                vmouse.syn()
+                time.sleep(hold)
+                vmouse.write(ecodes.EV_KEY, ecodes.BTN_LEFT, 0)
+                vmouse.syn()
+                time.sleep(wait)
+        finally:
+            with self._fire_lock:
+                self.firing_active = False
+            self.click_timestamps.clear()
 
     def _hold_fire(self, vmouse):
+        with self._fire_lock:
+            if self.firing_active:
+                return
+            self.firing_active = True
+
         delay = float(self.config["hold_delay"])
         rate = float(self.config["hold_rate"])
         time.sleep(delay)
-        while (
-            self.physical_left_down
-            and self.config["enable_hold"]
-            and self.macro_enabled_toggle
-            and not self.firing_burst
-        ):
-            if self.stop_event.is_set():
-                break
+        try:
+            while (
+                self.physical_left_down
+                and self.config["enable_hold"]
+                and self.macro_enabled_toggle
+            ):
+                if self.stop_event.is_set():
+                    break
+                vmouse.write(ecodes.EV_KEY, ecodes.BTN_LEFT, 0)
+                vmouse.syn()
+                time.sleep(rate / 2)
+                vmouse.write(ecodes.EV_KEY, ecodes.BTN_LEFT, 1)
+                vmouse.syn()
+                time.sleep(rate / 2)
+        finally:
+            with self._fire_lock:
+                self.firing_active = False
             vmouse.write(ecodes.EV_KEY, ecodes.BTN_LEFT, 0)
             vmouse.syn()
-            time.sleep(rate / 2)
-            vmouse.write(ecodes.EV_KEY, ecodes.BTN_LEFT, 1)
-            vmouse.syn()
-            time.sleep(rate / 2)
-        vmouse.write(ecodes.EV_KEY, ecodes.BTN_LEFT, 0)
-        vmouse.syn()
 
     def _keyboard_listener(self):
         target_key_name = self.config.get("toggle_key", "NUMPAD 7")
@@ -439,7 +451,7 @@ class MacroBackend:
                         self.physical_left_down = False
                     if not self.macro_enabled_toggle:
                         continue
-                    if event.value == 1 and not self.firing_burst:
+                    if event.value == 1 and not self.firing_active:
                         now = time.time()
                         self.click_timestamps.append(now)
                         valid = [
@@ -527,9 +539,20 @@ class App(ctk.CTk):
         ctk.CTkLabel(self.sidebar, text="SUB-MODES", font=ctk.CTkFont(size=12)).grid(
             row=4, column=0, padx=20, pady=(30, 0)
         )
-        self.switch_burst = ctk.CTkSwitch(self.sidebar, text="Burst Mode")
+        self.var_burst = ctk.StringVar(value="off")
+        self.var_hold = ctk.StringVar(value="off")
+        self.switch_burst = ctk.CTkSwitch(
+            self.sidebar, text="Burst Mode",
+            variable=self.var_burst, onvalue="on", offvalue="off",
+            command=self._on_burst_toggle
+        )
         self.switch_burst.grid(row=5, column=0, padx=20, pady=10)
-        self.switch_hold = ctk.CTkSwitch(self.sidebar, text="Hold Mode")
+
+        self.switch_hold = ctk.CTkSwitch(
+            self.sidebar, text="Hold Mode",
+            variable=self.var_hold, onvalue="on", offvalue="off",
+            command=self._on_hold_toggle
+        )
         self.switch_hold.grid(row=6, column=0, padx=20, pady=10)
         self.switch_audio = ctk.CTkSwitch(self.sidebar, text="Audio Notifications")
         self.switch_audio.grid(row=7, column=0, padx=20, pady=10)
@@ -683,10 +706,12 @@ class App(ctk.CTk):
         self.log_box.grid(row=row, column=0, sticky="ew")
         row += 1
 
+        # Initial sub-mode switch state from config (mutually exclusive)
         if self.backend.config["enable_burst"]:
-            self.switch_burst.select()
-        if self.backend.config["enable_hold"]:
-            self.switch_hold.select()
+            self.var_burst.set("on")
+            self.backend.config["enable_hold"] = False
+        elif self.backend.config["enable_hold"]:
+            self.var_hold.set("on")
         if self.backend.config.get("enable_audio", True):
             self.switch_audio.select()
         sys.stdout = self
@@ -789,6 +814,22 @@ class App(ctk.CTk):
         state_text = "ENABLED" if new_state else "DISABLED"
         print(f">>> GUI TOGGLE: Macros {state_text}")
 
+    def _on_burst_toggle(self):
+        if self.var_burst.get() == "on":
+            self.var_hold.set("off")
+            self.backend.config["enable_hold"] = False
+            self.backend.config["enable_burst"] = True
+        else:
+            self.backend.config["enable_burst"] = False
+
+    def _on_hold_toggle(self):
+        if self.var_hold.get() == "on":
+            self.var_burst.set("off")
+            self.backend.config["enable_burst"] = False
+            self.backend.config["enable_hold"] = True
+        else:
+            self.backend.config["enable_hold"] = False
+
     def write(self, text):
         self.log_box.insert("end", text)
         self.log_box.see("end")
@@ -824,8 +865,8 @@ class App(ctk.CTk):
             self.backend.config["keyboard_name"] = self.combo_kb.get()
             self.backend.config["toggle_modifier"] = self.combo_mod.get()
             self.backend.config["toggle_key"] = self.combo_key.get()
-            self.backend.config["enable_burst"] = bool(self.switch_burst.get())
-            self.backend.config["enable_hold"] = bool(self.switch_hold.get())
+            self.backend.config["enable_burst"] = (self.var_burst.get() == "on")
+            self.backend.config["enable_hold"] = (self.var_hold.get() == "on")
             self.backend.config["enable_audio"] = bool(self.switch_audio.get())
             self.backend.config["burst_count"] = int(self.entry_burst_count.get())
             self.backend.config["burst_duration"] = float(self.entry_burst_dur.get())
