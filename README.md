@@ -11,6 +11,7 @@ Input Master captures your physical mouse, creates a virtual mouse device, and l
 - **Hold Fire Mode** -- Automatically repeat clicks while holding the left mouse button
 - **Global Toggle Hotkey** -- Enable/disable macros with a configurable keyboard shortcut (e.g. Super+Numpad7)
 - **System Tray Integration** -- Starts minimized to tray, color-coded icon shows engine status (white=off, blue=active, red=disabled)
+- **Audio Notifications** -- Plays sounds when engine starts/stops or macros are toggled (works on both X11 and Wayland)
 - **Per-User Config** -- Settings saved to `~/.config/input-master/config.json`
 - **No Root Required at Runtime** -- Install script sets up proper permissions via udev rules and the `input` group
 

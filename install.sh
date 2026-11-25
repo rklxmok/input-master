@@ -66,6 +66,7 @@ mkdir -p "$INSTALL_DIR"
 cp "$SCRIPT_DIR/macro_gui.py" "$INSTALL_DIR/"
 cp "$SCRIPT_DIR/input-master.png" "$INSTALL_DIR/" 2>/dev/null || true
 cp "$SCRIPT_DIR"/tray-icon-*.png "$INSTALL_DIR/" 2>/dev/null || true
+cp "$SCRIPT_DIR"/sound_*.wav "$INSTALL_DIR/" 2>/dev/null || true
 
 # --- Create venv with system site packages (for gi/gtk) ---
 echo -e "${YELLOW}[3/6] Setting up Python environment...${NC}"
