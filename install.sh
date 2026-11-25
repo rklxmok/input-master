@@ -35,25 +35,19 @@ if command -v pacman &>/dev/null; then
     # Arch / Manjaro
     pacman -S --needed --noconfirm \
         python python-pip python-virtualenv tk \
-        python-pillow python-gobject gtk3 libappindicator-gtk3 \
-        2>/dev/null
+        python-pillow python-gobject gtk3 libappindicator-gtk3
 elif command -v apt-get &>/dev/null; then
     # Debian / Ubuntu
     apt-get update -qq
     apt-get install -y -qq \
         python3 python3-pip python3-venv python3-tk \
         python3-pil python3-pil.imagetk python3-gi \
-        gir1.2-gtk-3.0 \
-        2>/dev/null
-    apt-get install -y -qq gir1.2-ayatanaappindicator3-0.1 2>/dev/null \
-        || apt-get install -y -qq gir1.2-appindicator3-0.1 2>/dev/null \
-        || echo -e "${YELLOW}  AppIndicator not found - tray icon may use fallback backend${NC}"
+        gir1.2-gtk-3.0
 elif command -v dnf &>/dev/null; then
     # Fedora / RHEL
     dnf install -y \
         python3 python3-pip python3-tkinter \
-        python3-pillow python3-gobject gtk3 libappindicator-gtk3 \
-        2>/dev/null
+        python3-pillow python3-gobject gtk3 libappindicator-gtk3
 else
     echo -e "${RED}Unsupported package manager. Install manually:${NC}"
     echo "  python3, pip, tk, pillow, pygobject, gtk3, libappindicator"
@@ -134,7 +128,11 @@ StartupWMClass=Input Master Control
 DESKTOP
 
 # Autostart entry (starts in tray on login)
-AUTOSTART_DIR="/home/$ACTUAL_USER/.config/autostart"
+ACTUAL_USER_HOME="$(getent passwd "$ACTUAL_USER" 2>/dev/null | cut -d: -f6)"
+if [ -z "$ACTUAL_USER_HOME" ]; then
+    ACTUAL_USER_HOME="/home/$ACTUAL_USER"
+fi
+AUTOSTART_DIR="$ACTUAL_USER_HOME/.config/autostart"
 mkdir -p "$AUTOSTART_DIR"
 cp /usr/share/applications/input-master.desktop "$AUTOSTART_DIR/"
 chown "$ACTUAL_USER:$ACTUAL_USER" "$AUTOSTART_DIR/input-master.desktop"
